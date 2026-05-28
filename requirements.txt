@@ -1,0 +1,8 @@
+streamlit>=1.28
+pandas>=2.0
+numpy>=1.24
+plotly>=5.0
+duckdb>=0.9
+keyring>=24.0
+keyrings.cryptfile>=0.4
+fints>=4.0
