@@ -260,7 +260,7 @@ with tab_fints:
                     MAX("{col_dat.col}"::DATE) AS max_dat,
                     MAX("{col_rid.col}")       AS max_rid,
                     COALESCE(
-                        MAX("{col_dat.col}"::DATE) - INTERVAL '10 days',
+                        MAX("{col_dat.col}"::DATE) - INTERVAL '28 days',
                         DATE '1970-01-01'
                     )                          AS fp_from
                 FROM "{var_acc}"
@@ -278,7 +278,7 @@ with tab_fints:
         """).df()
 
         _row       = _meta.iloc[0]
-        start_date = (pd.Timestamp(_row["max_dat"]).date() - timedelta(days=10)) if pd.notna(_row["max_dat"]) else date(1970, 1, 1)
+        start_date = (pd.Timestamp(_row["max_dat"]).date() - timedelta(days=28)) if pd.notna(_row["max_dat"]) else date(1970, 1, 1)
         min_id     = (int(_row["max_rid"]) + 1) if pd.notna(_row["max_rid"]) else 0
         end_date   = date.today()
         tran_ddb   = set(_meta["fingerprint"].dropna())
@@ -401,7 +401,7 @@ with tab_csv:
 
         # Datums- & ID-Grenzen aus DB
         start_date = con.sql(f'SELECT MAX("{col_dat.col}"::DATE) FROM "{var_acc}"').fetchone()[0]
-        start_date = (start_date - timedelta(days=10)) if start_date is not None else date(1970, 1, 1)
+        start_date = (start_date - timedelta(days=28)) if start_date is not None else date(1970, 1, 1)
         min_id     = con.sql(f'SELECT MAX("{col_rid.col}") FROM "{var_acc}"').fetchone()[0]
         min_id     = (min_id + 1) if min_id is not None else 0
         end_date   = date.today()

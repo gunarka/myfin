@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import ast; ast.parse\\(open\\('app_forecast.py'\\).read\\(\\)\\); ast.parse\\(open\\('app_functions.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('app_forecast.py'\\).read\\(\\)\\); ast.parse\\(open\\('app_functions.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(grep -rn \"DE[0-9]\\\\{20,\\\\}\\\\|IBAN\\\\|SEPA\\\\|BIC\\\\|[A-Za-z]\\\\+\\\\.[A-Za-z]\\\\+@[A-Za-z]\\\\+\\\\.[a-z]\\\\{2,\\\\}\" /home/gunar/Programme/projects/myfin --include=\"*.py\" --include=\"*.json\" --include=\"*.env*\" --include=\"*.sql\" --exclude-dir=\".venv\" --exclude-dir=\"__pycache__\")",
+      "Bash(grep -rn \"IBAN\\\\s*=\\\\s*['\\\\\"]DE\\\\|iban\\\\s*=\\\\s*['\\\\\"]DE\\\\|placeholder.*DE[0-9]\\\\|example.*DE[0-9]\\\\|\\\\\"DE[0-9]\\\\{18,20\\\\}\\\\\"\\\\|'DE[0-9]\\\\{18,20\\\\}'\" /home/gunar/Programme/projects/myfin --include=\"*.py\" --exclude-dir=\".venv\")",
+      "Bash(cat)",
+      "Bash(python /tmp/check_unused.py)",
+      "Bash(python /tmp/check_unused2.py)",
+      "Bash(xargs -I {} basename {})",
+      "Read(//tmp/**)",
+      "Bash(git init *)",
+      "Bash(git check-ignore *)"
+    ]
+  }
+}
