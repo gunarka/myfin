@@ -1,0 +1,34 @@
+# --- MyFin: sensible/lokale Daten, niemals committen ---
+.data*/
+*.duckdb
+*.duckdb.wal
+*.db
+*.sqlite
+*.sqlite3
+keyring.cfg
+backups/
+
+# --- Zugangsdaten / Secrets ---
+.env
+.env.*
+secrets.toml
+.streamlit/secrets.toml
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+
+# --- Python ---
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+*.egg-info/
+
+# --- OS / Editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
