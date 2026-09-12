@@ -678,10 +678,12 @@ except Exception:
     con = st.session_state.con
 
 # Kern-Tabellen sicherstellen (relevant bei Erststart nach git-Clone)
-try:
-    ensure_core_tables(con)
-except Exception:
-    log.warning("Konnte Kern-Tabellen nicht anlegen/prüfen.", exc_info=True)
+if not st.session_state.get("_core_tables_ready"):
+    try:
+        ensure_core_tables(con)
+        st.session_state["_core_tables_ready"] = True
+    except Exception:
+        log.warning("Konnte Kern-Tabellen nicht anlegen/prüfen.", exc_info=True)
 
 # Migration: Spaltenabgleich aller IBAN-Transaktionstabellen gegen das
 # zentrale Schema (db_schema.TRANSACTION_COLUMNS) – generischer Ersatz für
@@ -732,13 +734,26 @@ def delete_fints_credentials(account: str) -> None:
 
 # ── Kategorien (normalisiert: groups + categories) ────────────────────────────
 
+def _ensure_core() -> None:
+    """
+    Stellt alle Kern-Tabellen/Views sicher – aber nur EINMAL pro Session.
+    Die DDL ist zwar idempotent, wurde aber zuvor bei jedem Laden jeder
+    Tabelle (und damit mehrfach pro Rerun) ausgeführt, inklusive der
+    Schema-Migrationen. Das kostete unnötig Zeit und Sperren auf der DB-Datei.
+    """
+    if st.session_state.get("_core_tables_ready"):
+        return
+    ensure_core_tables(con)
+    st.session_state["_core_tables_ready"] = True
+
+
 def ensure_categories_table() -> None:
     """
     Legt 'groups'/'categories' normalisiert an, falls noch nicht vorhanden
     (inkl. automatischer Migration eines alten, kombinierten Schemas).
     Nutzt das zentrale Schema aus db_schema.py.
     """
-    ensure_core_tables(con)
+    _ensure_core()
 
 
 def get_or_create_category_id(group: str | None, category: str | None) -> int | None:
@@ -831,7 +846,7 @@ def ensure_forecast_tables() -> None:
       - inflation:  jährlicher %-Aufschlag pro Gruppe
     Nutzt das zentrale Schema aus db_schema.py.
     """
-    ensure_core_tables(con)
+    _ensure_core()
 
 
 # ── Forecast: CRUD wiederkehrende Buchungen ───────────────────────────────────
@@ -971,10 +986,33 @@ def upsert_inflation(group: str, annual_pct: float) -> None:
 
 # ── Forecast: Szenarien speichern/laden ───────────────────────────────────────
 
-def list_scenarios() -> list[str]:
+# Die scenarios-Tabelle wird auch als generischer Key/Value-Speicher für die
+# Altersvorsorge genutzt (pension_*-Schlüssel, siehe unten). Diese internen
+# Einträge dürfen NICHT in der Szenario-Auswahl der Cashflow-Prognose
+# auftauchen – dort führten sie zuvor zu einem KeyError ('horizon'), weil sie
+# keine Prognose-Parameter enthalten.
+_INTERNAL_SCENARIO_PREFIXES = ("pension_",)
+
+
+def list_all_scenario_keys() -> list[str]:
+    """Alle Schlüssel der scenarios-Tabelle – inkl. interner pension_*-Einträge.
+    Nur für interne Verwendung (Migration, Pension-Module)."""
     ensure_forecast_tables()
     rows = con.execute('SELECT name FROM scenarios ORDER BY name').fetchall()
     return [r[0] for r in rows]
+
+
+def list_scenarios() -> list[str]:
+    """Benutzersichtbare Prognose-Szenarien (ohne interne pension_*-Schlüssel)."""
+    return [
+        n for n in list_all_scenario_keys()
+        if not n.startswith(_INTERNAL_SCENARIO_PREFIXES)
+    ]
+
+
+def is_reserved_scenario_name(name: str) -> bool:
+    """True, wenn der Name für interne Zwecke reserviert ist."""
+    return name.strip().startswith(_INTERNAL_SCENARIO_PREFIXES)
 
 
 def save_scenario(name: str, params: dict) -> None:
@@ -1003,8 +1041,10 @@ def delete_scenario(name: str) -> None:
 # Eintrag mit group="Altersvorsorge", falls der Beitrag im Cashflow auftauchen soll.
 
 def ensure_pension_tables() -> None:
-    ensure_core_tables(con)
-    _migrate_pension_scenarios_to_global()
+    _ensure_core()
+    if not st.session_state.get("_pension_migration_done"):
+        _migrate_pension_scenarios_to_global()
+        st.session_state["_pension_migration_done"] = True
 
 
 def load_pension_plans(active_only: bool = False) -> pd.DataFrame:
@@ -1537,7 +1577,7 @@ def load_pension_scenario(name: str) -> dict | None:
 
 def list_pension_scenarios() -> list[str]:
     prefix = _pension_scenario_key("")
-    return [n[len(prefix):] for n in list_scenarios() if n.startswith(prefix)]
+    return [n[len(prefix):] for n in list_all_scenario_keys() if n.startswith(prefix)]
 
 
 def delete_pension_scenario(name: str) -> None:
@@ -1653,7 +1693,7 @@ def _migrate_pension_scenarios_to_global() -> None:
     netto_keys = ("grundfreibetrag_entwicklung", "sonstige_abzuege",
                   "kvdr_pflichtversichert", "kv_zusatzbeitrag", "pv_kinderlos")
 
-    for full_key in list_scenarios():
+    for full_key in list_all_scenario_keys():
         if not full_key.startswith(legacy_prefix):
             continue
         rest = full_key[len(legacy_prefix):]
@@ -1755,7 +1795,7 @@ COICOP_DIVISIONS: dict[str, str] = {
 
 
 def ensure_inflation_history_table() -> None:
-    ensure_core_tables(con)
+    _ensure_core()
 
 
 def load_inflation_history(category_codes: list[str] | None = None) -> pd.DataFrame:
@@ -1822,15 +1862,22 @@ def upsert_inflation_history(df: pd.DataFrame) -> int:
         df["yoy_pct"] = df["yoy_pct"].where(df["yoy_pct"].notna(), pd.Series(calc, index=df.index))
 
     df["date"] = df["date"].dt.date
-    for _, r in df.iterrows():
+
+    # Bulk-Insert über ein registriertes DataFrame statt einer Query pro Zeile
+    # (bei Destatis-Importen sind das schnell mehrere zehntausend Zeilen).
+    cols = ["category_code", "category", "group_code", "group_label", "level",
+            "date", "index_value", "yoy_pct"]
+    df_ins = df[cols].drop_duplicates(subset=["category_code", "date"], keep="last")
+    con.register("_infl_hist_tmp", df_ins)
+    try:
         con.execute(
             'INSERT OR REPLACE INTO inflation_history '
-            '("category_code", "category", "group_code", "group_label", "level", '
-            ' "date", "index_value", "yoy_pct") VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            [r["category_code"], r["category"], _py(r.get("group_code")), _py(r.get("group_label")),
-             _py(r.get("level")), r["date"], _py(r.get("index_value")), _py(r.get("yoy_pct"))],
+            f'({", ".join(chr(34) + c + chr(34) for c in cols)}) '
+            f'SELECT {", ".join(chr(34) + c + chr(34) for c in cols)} FROM _infl_hist_tmp'
         )
-    return len(df)
+    finally:
+        con.unregister("_infl_hist_tmp")
+    return len(df_ins)
 
 
 def average_yoy_inflation(category_code: str, years_back: int | None = None) -> float | None:

@@ -162,6 +162,30 @@ TRANSACTION_COLUMNS: dict[str, str] = {
 }
 
 
+# ── Bezeichner-Validierung (zweite Sicherheitsschicht) ────────────────────
+# Tabellennamen (IBANs) können in DDL/ALTER nicht als Parameter gebunden
+# werden. app_functions.safe_table_name() prüft sie gegen die Accounts-
+# Whitelist; hier wird zusätzlich unmittelbar vor der String-Interpolation
+# das Format geprüft, damit auch ein direkter Aufruf aus Skripten oder ein
+# manipulierter Accounts-Eintrag keine SQL-Injection ermöglicht.
+
+import logging as _logging
+import re as _re
+
+_log = _logging.getLogger(__name__)
+
+_IBAN_TABLE_RE = _re.compile(r"[A-Z]{2}[0-9A-Z]{13,32}")
+_PLAIN_TABLE_RE = _re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def assert_safe_identifier(name: str) -> str:
+    """Erlaubt IBAN-Tabellen und einfache interne Tabellennamen; sonst ValueError."""
+    name = str(name).strip()
+    if _IBAN_TABLE_RE.fullmatch(name) or _PLAIN_TABLE_RE.fullmatch(name):
+        return name
+    raise ValueError(f"Unzulässiger Tabellenname: {name!r}")
+
+
 # ── Introspektions-Helfer ─────────────────────────────────────────────────
 
 def _table_exists(con, name: str) -> bool:
@@ -250,6 +274,7 @@ def _migrate_named_table_categories(con, table: str) -> None:
     noch im alten Format vorliegt. Stellt außerdem sicher, dass die Spalte
     category_id existiert. Idempotent.
     """
+    table = assert_safe_identifier(table)
     cols = _table_columns(con, table)
     if "category_id" not in cols:
         con.execute(f'ALTER TABLE "{table}" ADD COLUMN IF NOT EXISTS "category_id" INTEGER')
@@ -321,6 +346,7 @@ def _ensure_forecast_category_views(con) -> None:
 
 def ensure_transaction_view(con, iban: str) -> None:
     """Erstellt/aktualisiert die Lese-View '{iban}_v' mit aufgelöster group/category."""
+    iban = assert_safe_identifier(iban)
     con.execute(f'''
         CREATE OR REPLACE VIEW "{iban}_v" AS
         SELECT t.* EXCLUDE ("category_id"),
@@ -409,6 +435,7 @@ def create_transaction_table(con, iban: str) -> None:
     Text) – sowie die zugehörige Lese-View "{iban}_v".
     `iban` muss bereits validiert sein (siehe safe_table_name / _is_valid_iban).
     """
+    iban = assert_safe_identifier(iban)
     cols_sql = ", ".join(f'"{c}" {t}' for c, t in TRANSACTION_COLUMNS.items())
     con.execute(f'CREATE TABLE IF NOT EXISTS "{iban}" ({cols_sql})')
     ensure_transaction_view(con, iban)
@@ -423,8 +450,20 @@ def migrate_transaction_tables(con) -> None:
     verändert, nur ihre Speicherform (Text -> ID) für group/category.
     """
     ibans = [r[0] for r in con.execute('SELECT "IBAN" FROM "Accounts"').fetchall()]
-    for iban in ibans:
-        _migrate_named_table_categories(con, iban)
-        for col_name, col_type in TRANSACTION_COLUMNS.items():
-            con.execute(f'ALTER TABLE "{iban}" ADD COLUMN IF NOT EXISTS "{col_name}" {col_type}')
-        ensure_transaction_view(con, iban)
+    for raw_iban in ibans:
+        # Pro Konto isoliert: ein fehlerhaftes/fehlendes Konto darf die
+        # Migration der übrigen Konten nicht abbrechen (vorher wurde beim
+        # ersten Fehler die gesamte Schleife verlassen).
+        try:
+            iban = assert_safe_identifier(raw_iban)
+            if not _table_exists(con, iban):
+                # Konto angelegt, Tabelle fehlt (z.B. abgebrochene Anlage) –
+                # vollständig neu erzeugen statt ALTER TABLE fehlschlagen zu lassen.
+                create_transaction_table(con, iban)
+                continue
+            _migrate_named_table_categories(con, iban)
+            for col_name, col_type in TRANSACTION_COLUMNS.items():
+                con.execute(f'ALTER TABLE "{iban}" ADD COLUMN IF NOT EXISTS "{col_name}" {col_type}')
+            ensure_transaction_view(con, iban)
+        except Exception:
+            _log.warning("Migration für Konto übersprungen.", exc_info=True)

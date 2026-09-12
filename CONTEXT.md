@@ -133,39 +133,57 @@ aktueller Rentenwert (`AKTUELLER_RENTENWERT`) sind statisch im Code hinterlegt u
 der UI überschreibbar – kein automatischer Abruf.
 
 **Fakten & Szenarien (Speicherung):** Beides nutzt die vorhandene `scenarios`-Tabelle
-mit strukturierten Namen (kein neues Schema):
+als generischen Key/Value-Speicher mit strukturierten Namen (kein neues Schema):
 
 ```python
-save_pension_facts(person, {"geburtsdatum": ..., "rentenwert": ...})   # 1 Satz je Person
-load_pension_facts(person) -> dict
+save_pension_facts(person, {"geburtsdatum": ..., "rentenwert": ..., "ep_override": ...})
+load_pension_facts(person) -> dict                      # 1 Satz je Person
 
-save_pension_scenario(person, name, {                                  # N Szenarien je Person
+# Rentenentwicklungs-Szenarien sind GLOBAL (personenunabhängig)
+save_pension_scenario(name, {
     "monate_abweichung": ..., "rentenfaktor_label": ...,
-    "rentenwert_entwicklung": ..., "zukunft_ep": ...,
-    "grundfreibetrag_entwicklung": ..., "sonstige_abzuege": ...,
-    "kvdr_pflichtversichert": ..., "kv_zusatzbeitrag": ..., "pv_kinderlos": ...,
-    "status": "aktiv" | "inaktiv",
+    "rentenwert_entwicklung": ..., "erwerbsminderung_start": ...,
 })
-load_pension_scenario(person, name) -> dict | None
-list_pension_scenarios(person) -> list[str]
-delete_pension_scenario(person, name)
+load_pension_scenario(name) -> dict | None
+list_pension_scenarios() -> list[str]
+delete_pension_scenario(name)
 
-activate_pension_scenario(person, name)         # setzt "aktiv", alle anderen "inaktiv"
-get_active_pension_scenario(person) -> str | None
+# Auswahl und Annahmen dagegen je Person bzw. je Person+Szenario
+set_pension_active_scenario(person, name | None)
+get_pension_active_scenario(person) -> str | None
+save_pension_netto_annahmen(person, {...}) / load_pension_netto_annahmen(person)
+save_pension_baustein_auswahl(person, [plan_id, ...]) / load_pension_baustein_auswahl(person)
+save_pension_zukunft_ep(person, scenario, value) / load_pension_zukunft_ep(person, scenario)
 ```
 
-Intern: `pension_facts::<Person>` bzw. `pension_scenario::<Person>::<Name>` als
-`scenarios.name`. Je Person ist höchstens ein Szenario **aktiv** (Status im
-Szenario-Dict, exklusiv über `activate_pension_scenario` gesetzt/gewechselt). So kann
-z. B. „Gunar“ die Szenarien „Basis“ (Regelaltersrente, Rentenwert konstant) und
-„Frühe Rente“ (48 Monate vorgezogen, Rentenwert +1 %/Jahr) parallel pflegen und im Tab
-„Gesetzliche Rente“ per Multiselect vergleichen (Status, Rentenbeginn, Zugangsfaktor,
-Entgeltpunkte, Bruttorente). Neu gespeicherte Szenarien starten bewusst **inaktiv**
-(kein Auto-Aktivieren) – die Aktivierung/der Wechsel erfolgt ausschließlich im Tab
-„Verwalten“ (Szenario-Auswahl + Button „✅ Aktivieren“ innerhalb der Netto-Berechnung);
-beim Speichern eines bestehenden Szenarios (gleicher Name) bleibt dessen Status
-erhalten. Das aktive Szenario steuert die **Netto-Berechnung im Tab „Verwalten“** (dort
-wird nur die Person gewählt, nicht mehr die Annahmen).
+Intern belegte `scenarios.name`-Schlüssel:
+
+| Schlüssel | Inhalt |
+|---|---|
+| `pension_facts::<Person>` | Fakten je Person |
+| `pension_scenario::<Name>` | globales Rentenentwicklungs-Szenario |
+| `pension_active_scenario::<Person>` | gewähltes Szenario je Person |
+| `pension_netto_annahmen::<Person>` | Steuer-/KV-Annahmen je Person |
+| `pension_baustein_auswahl::<Person>` | einbezogene Vorsorge-Bausteine |
+| `pension_zukunft_ep::<Person>::<Szenario>` | künftige Entgeltpunkte/Jahr |
+| `pension_last_context` | zuletzt bearbeitete Person/Szenario |
+| `pension_migration_v3_done` | Migrationsmarker |
+
+**Wichtig:** Diese internen Schlüssel sind für die Cashflow-Prognose unsichtbar.
+`list_scenarios()` filtert alles mit dem Präfix `pension_` heraus und liefert
+nur echte Prognose-Szenarien; `list_all_scenario_keys()` liefert die
+ungefilterte Liste und ist ausschließlich für Migration und Pension-Module
+gedacht. `is_reserved_scenario_name(name)` verhindert, dass ein Nutzer ein
+Prognose-Szenario unter einem reservierten Namen anlegt. Ohne diese Trennung
+tauchten die Pension-Schlüssel in der Szenario-Auswahl des Prognose-Tabs auf
+und lösten dort einen `KeyError: 'horizon'` aus.
+
+Ein Szenario ist damit personenübergreifend wiederverwendbar: z. B. „Basis“
+(Regelaltersrente, Rentenwert konstant) und „Frühe Rente“ (48 Monate
+vorgezogen, Rentenwert +1 %/Jahr) können von mehreren Personen gemeinsam
+genutzt werden, während Bausteine und Steuerannahmen je Person separat
+bleiben. `_migrate_pension_scenarios_to_global()` überführt ältere,
+personengebundene Szenarien einmalig und verlustfrei in dieses Format.
 
 ### Netto-Berechnung (vereinfachte Einkommensteuer)
 
@@ -268,10 +286,20 @@ note          TEXT
 
 ## Sicherheits-Konventionen
 
-- **IBANs als Tabellennamen** immer über `safe_table_name(iban)` validieren (DB-Whitelist)
+- **IBANs als Tabellennamen** immer über `safe_table_name(iban)` validieren (DB-Whitelist).
+  Zusätzlich prüft `db_schema.assert_safe_identifier()` unmittelbar vor jeder DDL/ALTER
+  erneut das Format – Tabellennamen lassen sich nicht parametrisieren, deshalb zwei Schichten.
 - **SQL** immer parametrisiert (`?`), nie String-Interpolation mit User-Input
 - **PINs** niemals loggen, anzeigen oder in Session-State schreiben (nur Keyring)
-- **HTTPS** für FinTS-Server erzwingen
+- **HTTPS** für FinTS-Server erzwingen – bei der Eingabe (`app_admin.py`) **und**
+  beim Verbindungsaufbau (`app_retrieve._make_client`). Die zweite Prüfung fängt
+  Zugangsdaten ab, die aus einer älteren Version stammen oder extern in den
+  Keyring geschrieben wurden.
+- **Kontoanlage** ist transaktional: schlägt ein Schritt fehl, werden Accounts-Zeile
+  und Keyring-Eintrag zurückgerollt – sonst blieben verwaiste Zugangsdaten inkl. PIN zurück.
+- **Paketverwaltung**: `_valid_pkg_spec()` erlaubt nur reine PEP-508-Anforderungen,
+  kein Whitespace, keine Optionen/Pfade/URLs (sonst ließe sich eine fremde
+  Paketquelle unterschieben).
 - `build_select()` für SELECT-Statements verwenden
 - **DB-Verbindung**: `_connect_duckdb_with_recovery()` in `app_functions.py` fängt ein
   defektes WAL-Log ab (z.B. nach hartem Prozessabbruch/Absturz). DB-Datei + WAL werden
@@ -408,6 +436,7 @@ Tab **Software**: Paketverwaltung (installieren, deinstallieren, Snapshot), Akti
 | `berechne_gesetzliche_rente(...)` | Entgeltpunkte-Rechner gesetzliche Rente (siehe pension_income-Tabelle oben) |
 | `ensure_pension_income_years(person, start, end)` | Füllt Jahres-Entgelte-Lücken (Default ab 1995) mit 0 €/Referenzwert auf |
 | `save_pension_facts` / `load_pension_facts` | Fakten (Geburtsdatum, Rentenwert) je Person |
-| `save_pension_scenario` / `load_pension_scenario` / `list_pension_scenarios` / `delete_pension_scenario` | Benannte Annahmen-Szenarien je Person |
-| `activate_pension_scenario` / `get_active_pension_scenario` | Aktivierung/Abfrage des einen aktiven Szenarios je Person |
+| `save_pension_scenario` / `load_pension_scenario` / `list_pension_scenarios` / `delete_pension_scenario` | Benannte, **globale** Annahmen-Szenarien zur Rentenentwicklung |
+| `set_pension_active_scenario` / `get_pension_active_scenario` | Welches globale Szenario eine Person nutzt |
+| `list_scenarios` / `list_all_scenario_keys` / `is_reserved_scenario_name` | Prognose-Szenarien (gefiltert) vs. alle internen Schlüssel |
 | `berechne_netto_rente(...)` | Netto-Rente: Besteuerungsanteil, Grundfreibetrag, § 32a-Tarif, Soli, KV/PV (KVdR), weitere Alterseinkünfte |

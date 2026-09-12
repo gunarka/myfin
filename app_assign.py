@@ -291,7 +291,10 @@ with st.expander("➕ Kontext / Beziehung ergänzen"):
 
 # ── Editierbarer Datatable + Kategorien-Referenz ─────────────────────────────
 def _toggle_ref() -> None:
-    st.session_state["show_cat_ref"] = not st.session_state.get("show_cat_ref", True)
+    # Default MUSS identisch zu _show_ref sein – zuvor stand hier True,
+    # wodurch der erste Klick auf "Referenz einblenden" den Wert auf False
+    # setzte und der Button scheinbar wirkungslos war.
+    st.session_state["show_cat_ref"] = not st.session_state.get("show_cat_ref", False)
 
 _show_ref = st.session_state.get("show_cat_ref", False)
 _, _col_btn = st.columns([3, 1])

@@ -32,10 +32,19 @@ SENSITIVE_PATTERNS = [
 ]
 
 
-def run(cmd: list[str], cwd: str) -> str:
+def _redact(text: str, secret: str | None) -> str:
+    """Entfernt das Token aus Ausgaben. Git schreibt die komplette Remote-URL
+    in Fehlermeldungen – ohne Redaction landet das Token im Terminal-Log."""
+    return text.replace(secret, "***") if secret and text else text
+
+
+def run(cmd: list[str], cwd: str, secret: str | None = None) -> str:
     result = subprocess.run(cmd, cwd=cwd, text=True, capture_output=True)
     if result.returncode != 0:
-        sys.exit(f"Fehler bei '{' '.join(cmd)}':\n{result.stderr}")
+        sys.exit(
+            f"Fehler bei '{_redact(' '.join(cmd), secret)}':\n"
+            f"{_redact(result.stderr, secret)}"
+        )
     return result.stdout.strip()
 
 
@@ -116,9 +125,15 @@ def main() -> None:
     else:
         run(["git", "remote", "add", "origin", remote_url], repo_dir)
 
-    # Push: Token nur temporär in der Push-URL, wird nicht gespeichert
-    push_url = f"https://{token}@github.com/{owner}/{args.name}.git"
-    run(["git", "push", "-u", push_url, args.branch], repo_dir)
+    # Push: Token nur transient in der Push-URL.
+    # SICHERHEIT: KEIN "-u" mit der Token-URL – git schreibt das Upstream-Ziel
+    # dauerhaft nach .git/config und damit auch das Token im Klartext.
+    # Stattdessen gegen die Token-URL pushen und den Upstream separat auf das
+    # token-freie "origin" setzen.
+    push_url = f"https://x-access-token:{token}@github.com/{owner}/{args.name}.git"
+    run(["git", "push", push_url, f"HEAD:{args.branch}"], repo_dir, secret=token)
+    run(["git", "fetch", "origin", args.branch], repo_dir)
+    run(["git", "branch", "--set-upstream-to", f"origin/{args.branch}", args.branch], repo_dir)
 
     print(f"Fertig: {repo['html_url']}")
 

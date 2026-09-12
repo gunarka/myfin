@@ -124,7 +124,7 @@ def get_group_category(applicants: list[str]) -> pd.DataFrame:
     return result
 
 
-def _finalize_new_transactions(df_prc: pd.DataFrame, min_id: int, flt_len: int) -> pd.DataFrame:
+def _finalize_new_transactions(df_prc: pd.DataFrame, min_id: int) -> pd.DataFrame:
     """
     Gemeinsame Nachbearbeitung für FinTS- und CSV-Importe: Empfänger/Ort-Split,
     Gruppe/Kategorie-Zuordnung, Übersetzung nach category_id (normalisiertes
@@ -165,7 +165,10 @@ def _finalize_new_transactions(df_prc: pd.DataFrame, min_id: int, flt_len: int) 
     ]
 
     df_prc = df_prc.sort_values(col_dat.col, kind="stable").reset_index(drop=True)
-    df_prc[col_rid.col] = range(min_id, min_id + flt_len)
+    # row_id aus der TATSÄCHLICHEN Zeilenzahl ableiten: der Merge mit den
+    # Gruppe/Kategorie-Vorschlägen kann die Zeilenzahl theoretisch verändern,
+    # eine fest vorgegebene Länge würde dann einen ValueError auslösen.
+    df_prc[col_rid.col] = range(min_id, min_id + len(df_prc))
     df_prc[col_yea.col] = pd.to_datetime(df_prc[col_dat.col]).dt.year
     df_prc[col_mon.col] = pd.to_datetime(df_prc[col_dat.col]).dt.month
     return df_prc
@@ -264,10 +267,22 @@ def _handle_tan(client: FinTS3PinTanClient) -> None:
 
 
 def _make_client(creds) -> FinTS3PinTanClient:
+    """
+    Baut den FinTS-Client auf.
+    SICHERHEIT: TLS wird hier erneut erzwungen. Die Prüfung in app_admin.py
+    greift nur bei der Eingabe – Zugangsdaten, die aus einer älteren Version
+    stammen oder extern in den Keyring geschrieben wurden, würden sonst PIN
+    und Kontodaten im Klartext über HTTP übertragen.
+    """
     import warnings
     from fints.parser import FinTSParserWarning
     from fints.client import FinTS3PinTanClient
     from fints.utils import minimal_interactive_cli_bootstrap
+    if not str(creds.server).strip().lower().startswith("https://"):
+        raise ValueError(
+            "FinTS-Server-URL verwendet kein HTTPS. Abruf abgebrochen – bitte "
+            "die URL unter ⚙️ Administrieren korrigieren."
+        )
     warnings.filterwarnings("ignore", category=FinTSParserWarning)
     client = FinTS3PinTanClient(
         bank_identifier=creds.bank_identifier,
@@ -335,7 +350,11 @@ with tab_fints:
                 st.stop()
             with st.spinner("Lade Transaktionen …"):
                 from fints.client import NeedTANResponse
-                client = _make_client(creds)
+                try:
+                    client = _make_client(creds)
+                except ValueError as e:
+                    st.error(f"❌ {e}")
+                    st.stop()
                 with client:
                     _handle_tan(client)
 
@@ -417,7 +436,7 @@ with tab_fints:
             if flt_len == 0:
                 st.info("Keine neuen Buchungen.")
             else:
-                df_prc = _finalize_new_transactions(df_prc, min_id, flt_len)
+                df_prc = _finalize_new_transactions(df_prc, min_id)
 
                 # Saldo-Rückrechnung setzt chronologische Reihenfolge voraus –
                 # _finalize_new_transactions() sortiert bereits nach col_dat.
@@ -541,6 +560,24 @@ with tab_csv:
             }.items() if k in df_raw.columns}
             df_prc = df_raw.rename(columns=rename_map).copy()
 
+            # Nicht jede Bank liefert alle Spalten (z.B. fehlt "Wertstellungs-
+            # datum" oder "Saldo"). Fehlende Pflichtspalten anlegen statt mit
+            # KeyError abzubrechen; ohne Buchungsdatum/Betrag ist die Datei
+            # allerdings nicht verwertbar.
+            _missing_required = [
+                lbl for lbl, c in (("Buchung", col_dat.col), ("Betrag", col_amt.col))
+                if c not in df_prc.columns
+            ]
+            if _missing_required:
+                st.error(
+                    "Pflichtspalte(n) fehlen in der CSV-Datei: "
+                    + ", ".join(_missing_required)
+                )
+                st.stop()
+            for _c in (col_da1.col, col_sld.col, col_anm.col, col_add.col, col_inf.col):
+                if _c not in df_prc.columns:
+                    df_prc[_c] = None
+
             df_prc[col_dat.col] = df_prc[col_dat.col].apply(_de_date)
             df_prc[col_da1.col] = df_prc[col_da1.col].apply(_de_date)
             df_prc[col_amt.col] = df_prc[col_amt.col].apply(_de_float)
@@ -588,7 +625,7 @@ with tab_csv:
             if flt_len == 0:
                 st.info("Keine neuen Buchungen.")
             else:
-                df_prc = _finalize_new_transactions(df_prc, min_id, flt_len)
+                df_prc = _finalize_new_transactions(df_prc, min_id)
 
                 st.session_state["csv_df_prc"]    = df_prc
                 st.session_state["csv_downloaded"] = True

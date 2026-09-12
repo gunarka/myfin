@@ -79,12 +79,17 @@ def _get_installed() -> list[dict]:
 
 
 def _valid_pkg_spec(spec: str) -> bool:
-    # SICHERHEIT: führende '-' zusätzlich verboten, sonst könnten Eingaben als
-    # Pip-Flag interpretiert werden (z.B. "--upgrade-strategy=eager").
-    return (
-        bool(re.match(r'^[A-Za-z0-9_\-\.\[\],>=<!~\s]+$', spec))
-        and not spec.lstrip().startswith("-")
-    )
+    """
+    SICHERHEIT: Erlaubt ausschließlich eine PEP-508-artige Anforderung
+    ("paket", "paket[extra]", "paket==1.2.3"). Whitespace ist komplett
+    verboten – zuvor erlaubte die Regex Leerzeichen, wodurch Eingaben wie
+    "requests --index-url http://…" (Umleitung auf eine fremde Paketquelle)
+    die Prüfung passierten. Ebenso ausgeschlossen: Pfade, URLs und alles,
+    was pip als Option oder lokale/entfernte Quelle interpretieren könnte.
+    """
+    spec = spec.strip()
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._-]+\])?"
+                             r"((==|>=|<=|~=|!=|>|<)[A-Za-z0-9.*+!-]+)?", spec))
 
 
 def _collect_project_imports() -> set[str]:
@@ -172,9 +177,16 @@ require_master_password()
 st.header("⚙️ Administrieren")
 
 
+def _normalize_iban(iban: str) -> str:
+    """Entfernt Leerzeichen und normalisiert auf Großbuchstaben.
+    Ohne diese Normalisierung scheiterte die Validierung an jeder IBAN, die
+    – wie auf Kontoauszügen üblich – in Vierergruppen eingegeben wurde."""
+    return re.sub(r"\s+", "", str(iban)).upper()
+
+
 def _is_valid_iban(iban: str) -> bool:
     """Format- (Regex) und Prüfsummenvalidierung (Mod-97, ISO 7064)."""
-    iban = iban.strip()
+    iban = _normalize_iban(iban)
     return bool(re.fullmatch(r"[A-Z]{2}[0-9A-Z]{13,32}", iban)) and _iban_checksum_valid(iban)
 
 
@@ -215,24 +227,30 @@ with tab_accounts:
                 st.error("FinTS Server-URL muss mit https:// beginnen (TLS erforderlich).")
             else:
                 account_key = f"{name}_{bank}_{typ}"
+                # safe_table_name() kann hier nicht genutzt werden, da die IBAN noch nicht
+                # in der Accounts-Whitelist steht. Die Regex-Prüfung via _is_valid_iban()
+                # erlaubt nur [A-Z]{2}[0-9A-Z]{13,32} – kein SQL-Sonderzeichen möglich;
+                # db_schema.assert_safe_identifier() prüft zusätzlich vor der DDL.
+                validated_iban = _normalize_iban(bank_account)
+                _creds_written = False
                 try:
+                    # Reihenfolge: erst DB-Eintrag (UNIQUE-Constraint auf IBAN schlägt
+                    # bei Duplikaten fehl), dann Keyring. Andernfalls blieben nach einem
+                    # abgelehnten Duplikat verwaiste Zugangsdaten inkl. PIN im Keyring.
+                    con.execute(
+                        "INSERT INTO Accounts (Person, Bank, Konto, IBAN, Abruf) VALUES (?, ?, ?, ?, ?)",
+                        [name, bank, typ, validated_iban, abruf],
+                    )
                     if abruf == "FinTS":
                         save_fints_credentials(FintsCredentials(
                             account=account_key,
                             name=name, bank=bank, typ=typ,
-                            bank_account=bank_account.strip(),
+                            bank_account=validated_iban,
                             bank_identifier=bank_identifier,
                             user_id=user_id, pin=pin,
-                            server=server, pid=pid,
+                            server=server.strip(), pid=pid,
                         ))
-                    con.execute(
-                        "INSERT INTO Accounts (Person, Bank, Konto, IBAN, Abruf) VALUES (?, ?, ?, ?, ?)",
-                        [name, bank, typ, bank_account.strip(), abruf],
-                    )
-                    # safe_table_name() kann hier nicht genutzt werden, da die IBAN noch nicht
-                    # in der Accounts-Whitelist steht. Die Regex-Prüfung via _is_valid_iban()
-                    # erlaubt nur [A-Z]{2}[0-9A-Z]{13,32} – kein SQL-Sonderzeichen möglich.
-                    validated_iban = bank_account.strip()
+                        _creds_written = True
                     # Immer vollständiges Schema anlegen (db_schema.TRANSACTION_COLUMNS) –
                     # vorher wurde beim allerersten Konto (kein Nachbarkonto als Vorlage
                     # vorhanden) nur eine einzelne Spalte "row_id" angelegt, wodurch der
@@ -242,6 +260,14 @@ with tab_accounts:
                     st.session_state.pop("saved_users_cache", None)
                     st.success(f"✅ Konto **{account_key}** ({abruf}) gespeichert.")
                 except Exception as e:
+                    # Teil-Anlage zurückrollen, damit kein inkonsistenter Zustand
+                    # (Konto ohne Tabelle bzw. Keyring ohne Konto) zurückbleibt.
+                    try:
+                        con.execute("DELETE FROM Accounts WHERE IBAN = ?", [validated_iban])
+                        if _creds_written:
+                            delete_fints_credentials(account_key)
+                    except Exception:
+                        log.warning("Rollback der Kontoanlage fehlgeschlagen.", exc_info=True)
                     st.error(f"Fehler beim Speichern: {e}")
 
     # ── Laden ─────────────────────────────────────────────────────────────────

@@ -715,7 +715,11 @@ with c4:
     )
     heat["ym"] = heat[col_yea.col].astype(str) + "-" + heat[col_mon.col].astype(str).str.zfill(2)
     pivot = heat.pivot_table(index=col_grp.col, columns="ym", values=col_amt.col, aggfunc="sum").fillna(0)
-    pivot_pct = pivot.div(pivot.sum(axis=1), axis=0) * 100
+    # Gruppen ohne Ausgaben im Zeitraum ergeben Summe 0 – ohne Ersatz durch NaN
+    # entstünden inf-Werte, die Plotly als leere Zeile mit kaputter Farbskala
+    # rendert. Ersatzwert 1 liefert korrekt 0 % für alle Zellen dieser Gruppe.
+    _row_sums = pivot.sum(axis=1).replace(0, 1)
+    pivot_pct = pivot.div(_row_sums, axis=0) * 100
 
     fig_hm = go.Figure(go.Heatmap(
         z=pivot_pct.values, x=pivot_pct.columns.tolist(), y=pivot.index.tolist(),

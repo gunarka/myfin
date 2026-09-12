@@ -30,6 +30,7 @@ from app_functions import (
     load_oneoff, save_oneoff, update_oneoff, delete_oneoff,
     load_inflation, upsert_inflation,
     list_scenarios, save_scenario, load_scenario, delete_scenario,
+    is_reserved_scenario_name,
     detect_recurring, category_average, distinct_field_values,
     compute_forecast, liquidity_warnings, forecast_vs_actual,
     # Historische Inflation (Referenzdaten)
@@ -1501,6 +1502,8 @@ with tab_scenarios:
         if st.button("💾 Aktuelle Parameter speichern", width="stretch"):
             if not sc_name.strip():
                 st.error("Bitte einen Namen vergeben.")
+            elif is_reserved_scenario_name(sc_name):
+                st.error("Dieser Name ist intern reserviert. Bitte einen anderen wählen.")
             else:
                 save_scenario(sc_name.strip(), {
                     "horizon":      int(st.session_state.get("fc_horizon", 24)),
@@ -1527,12 +1530,13 @@ with tab_scenarios:
             cmp_rows = []
             for name in compare_sel:
                 p = load_scenario(name)
-                if not p:
+                if not p or "horizon" not in p:
+                    st.warning(f"Szenario „{name}“ enthält keine Prognose-Parameter – übersprungen.")
                     continue
                 fc_s = compute_forecast(
                     horizon_months=int(p["horizon"]),
-                    pct_increase=float(p["pct_increase"]),
-                    confidence=float(p["confidence"]),
+                    pct_increase=float(p.get("pct_increase", 0.0)),
+                    confidence=float(p.get("confidence", 1.0)),
                     inflation_map=infl_map,
                     include_oneoff=bool(p.get("include_one", True)),
                 )
@@ -1543,9 +1547,9 @@ with tab_scenarios:
                 )
                 cmp_rows.append({
                     "Szenario":         name,
-                    "Aufschlag":        f"{p['pct_increase']:+.1f} %",
-                    "Konfidenz":        f"{p['confidence']:.1f}σ",
-                    "Zeitraum":         f"{p['horizon']} M",
+                    "Aufschlag":        f"{float(p.get('pct_increase', 0.0)):+.1f} %",
+                    "Konfidenz":        f"{float(p.get('confidence', 1.0)):.1f}σ",
+                    "Zeitraum":         f"{int(p['horizon'])} M",
                     "Endsaldo":         m["saldo"].iloc[-1] if not m.empty else 0,
                     "Min. Saldo unten": m["saldo_lower"].min() if not m.empty else 0,
                 })

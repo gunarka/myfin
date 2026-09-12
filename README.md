@@ -14,6 +14,7 @@ Lokale Streamlit-App zur persönlichen Finanzverwaltung. Transaktionen werden pe
 ## Voraussetzungen
 
 - Python ≥ 3.11
+- Streamlit ≥ 1.63 (wird über `requirements.txt` installiert)
 - Zugang zu einem FinTS/HBCI-fähigen Konto (optional, CSV-Import funktioniert ohne)
 
 ## Installation
@@ -50,9 +51,15 @@ verloren, nie ältere Daten.
 ## Sicherheitshinweise
 
 - PINs werden ausschließlich im Keyring gespeichert, nie geloggt oder im Session-State abgelegt
-- IBANs als Tabellennamen werden gegen eine DB-Whitelist validiert (kein SQL-Injection-Risiko)
-- Alle SQL-Abfragen sind parametrisiert
-- FinTS-Verbindungen erzwingen HTTPS
+- IBANs als Tabellennamen werden zweifach geprüft: gegen die DB-Whitelist
+  (`safe_table_name`) und unmittelbar vor jeder DDL nochmals gegen das
+  IBAN-Format (`db_schema.assert_safe_identifier`)
+- Alle SQL-Abfragen mit Werten aus Eingaben sind parametrisiert
+- FinTS-Verbindungen erzwingen HTTPS – sowohl bei der Eingabe der Server-URL
+  als auch erneut beim Verbindungsaufbau
+- Die Paketverwaltung akzeptiert nur reine PEP-508-Anforderungen
+  (`paket`, `paket[extra]`, `paket==1.2.3`) – keine Optionen, Pfade oder URLs,
+  über die eine fremde Paketquelle untergeschoben werden könnte
 
 ## Auf GitHub veröffentlichen
 
@@ -65,6 +72,10 @@ gestaged sind, und pusht den Code.
 export GITHUB_TOKEN=ghp_xxx   # Token mit Scope "repo", nie einchecken
 python publish_to_github.py --name myfin --private
 ```
+
+Das Token wird nur transient in der Push-URL verwendet, nie nach `.git/config`
+geschrieben (der Upstream wird separat auf das token-freie `origin` gesetzt)
+und aus allen Fehlerausgaben herausgefiltert.
 
 ## Bekannte Einschränkung
 
